@@ -4,23 +4,19 @@ import { Brain, User, MoveVertical, MoveHorizontal, Orbit, RectangleHorizontal }
 import { cn } from "@/lib/utils"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
-interface UploadedImage {
-  file: File
-  preview: string
-}
-
 interface AnalysisResult {
   face_shape: string
-  face_length_cm: number
-  cheekbone_width_cm: number
-  jaw_width_cm: number
-  forehead_width_cm: number
-  jaw_curve_ratio: number
-  processed_image: string
+  measurements: {
+    face_length_cm: number
+    cheekbone_width_cm: number
+    jaw_width_cm: number
+    forehead_width_cm: number
+    jaw_curve_ratio: number
+  }
+  image_url: string
 }
 
 interface AnalysisCardProps {
-  uploadedImage: UploadedImage
   analysis: AnalysisResult | null
   isAnalyzing: boolean
 }
@@ -55,18 +51,15 @@ const StatCard = ({ icon: Icon, label, value, delay, tooltipText }: { icon: Reac
     return cardContent;
 };
 
-export default function AnalysisCard({ uploadedImage, analysis, isAnalyzing }: AnalysisCardProps) {
-  const displayImage = analysis?.processed_image
-    ? `http://localhost:5000/uploads/${analysis.processed_image}`
-    : uploadedImage.preview
+export default function AnalysisCard({ analysis, isAnalyzing }: AnalysisCardProps) {
+  const displayImage = analysis?.image_url || "/placeholder.svg";
   
+  const faceLengthDisplay = analysis ? analysis.measurements.face_length_cm.toFixed(1) + " cm" : "N/A";
+  const foreheadWidthDisplay = analysis ? analysis.measurements.forehead_width_cm.toFixed(1) + " cm" : "N/A";
+  const cheekboneWidthDisplay = analysis ? analysis.measurements.cheekbone_width_cm.toFixed(1) + " cm" : "N/A";
+  const jawWidthDisplay = analysis ? analysis.measurements.jaw_width_cm.toFixed(1) + " cm" : "N/A";
+  const jawCurveDisplay = analysis ? `1:${analysis.measurements.jaw_curve_ratio.toFixed(2)}` : "N/A";
   
-  const faceLengthDisplay = analysis ? (analysis.face_length_cm + 2.7).toFixed(1) + " cm" : "N/A";
-  const foreheadWidthDisplay = analysis ? analysis.forehead_width_cm.toFixed(1) + " cm" : "N/A";
-  const cheekboneWidthDisplay = analysis ? analysis.cheekbone_width_cm.toFixed(1) + " cm" : "N/A";
-  const jawWidthDisplay = analysis ? analysis.jaw_width_cm.toFixed(1) + " cm" : "N/A";
-  const jawCurveDisplay = analysis ? `1:${analysis.jaw_curve_ratio.toFixed(2)}` : "N/A";
-
   return (
     <div className="grid lg:grid-cols-5 gap-8 mb-16 items-start mt-12">
       <div className="lg:col-span-2 relative group animate-fade-in">
@@ -75,7 +68,7 @@ export default function AnalysisCard({ uploadedImage, analysis, isAnalyzing }: A
           <div className="relative z-10 p-4">
             <div className="relative aspect-square rounded-2xl overflow-hidden bg-slate-900 shadow-inner">
               <img
-                src={displayImage || "/placeholder.svg"}
+                src={displayImage}
                 alt="Face analysis"
                 className="w-full h-full object-cover transition-all duration-500 group-hover:scale-105"
               />

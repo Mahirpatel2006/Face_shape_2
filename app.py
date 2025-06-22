@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, Response
+from flask import Flask, request, render_template, Response, jsonify
 import cv2
 import numpy as np
 import pickle
@@ -11,12 +11,17 @@ from mediapipe.tasks.python import vision
 from mediapipe.framework.formats import landmark_pb2
 from flask import Flask, request, render_template, Response, url_for, send_from_directory
 from flask_cors import CORS
+from dotenv import load_dotenv
+# Import database functions
+from database import upload_image_to_cloudinary, save_analysis_to_db
+
+# Load environment variables
+load_dotenv()
+
 # Suppress specific deprecation warnings from protobuf
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
 app = Flask(__name__, template_folder='templates')
 CORS(app)  # Enable CORS for all routes
-app.config['UPLOAD_FOLDER'] = 'uploads/'
-app.config['ALLOWED_EXTENSIONS'] = {'jpg', 'jpeg', 'png'}
 
 # Initialize MediaPipe Face Landmarker
 base_options = python.BaseOptions(model_asset_path='face_landmarker_v2_with_blendshapes.task')
@@ -172,59 +177,117 @@ def generate_frames():
 def index():
     return render_template('index.html')
 
+@app.route('/analyze', methods=['POST'])
+def analyze_face():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
 
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
 
-@app.route('/upload', methods=['GET', 'POST'])
-def upload_file():
-    face_shape = None
-    error = None
-    file_url = None  # Path to the annotated image file
+    try:
+        # --- 1. Read image and perform analysis first ---
+        img_bytes = file.read()
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+        
+        detection_result = face_landmarker.detect(mp_image)
 
-    if request.method == 'POST':
-        if 'file' not in request.files:
-            error = "No file part"
-        else:
-            file = request.files['file']
-            if file.filename == '':
-                error = "No selected file"
-            elif file and allowed_file(file.filename):
-                filename = secure_filename(file.filename)
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(file_path)
+        if not detection_result.face_landmarks:
+            return jsonify({"error": "No face detected"}), 400
 
-                # Read and process the image using OpenCV and MediaPipe
-                img = cv2.imread(file_path)
-                rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-                detection_result = face_landmarker.detect(image)
+        # --- 2. Get data, calculate features, and predict shape ---
+        face_landmarks = detection_result.face_landmarks[0]
+        
+        # First, calculate the features
+        landmarks_normalized = np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks])
+        face_features = calculate_face_features(landmarks_normalized)
+        
+        # Then, predict the shape
+        face_shape_label = face_shape_model.predict([face_features])[0]
+        face_shape = get_face_shape_label(face_shape_label)
 
-                if detection_result.face_landmarks:
-                    for face_landmarks in detection_result.face_landmarks:
-                        landmarks = [[lm.x, lm.y, lm.z] for lm in face_landmarks]
-                        landmarks = np.array(landmarks)
-                        face_features = calculate_face_features(landmarks)
-                        face_shape_label = face_shape_model.predict([face_features])[0]
-                        face_shape = get_face_shape_label(face_shape_label)
+        # --- 3. Draw landmarks on the image ---
+        annotated_image_rgb = draw_landmarks_on_image(rgb_image, detection_result)
+        cv2.putText(annotated_image_rgb, f"Face Shape: {face_shape}", (20, 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                        # Draw the landmarks and face shape text on the image
-                        annotated_image = draw_landmarks_on_image(rgb_image, detection_result)
-                        cv2.putText(annotated_image, f"Face Shape: {face_shape}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # --- 4. Upload the PROCESSED image to Cloudinary ---
+        annotated_image_bgr = cv2.cvtColor(annotated_image_rgb, cv2.COLOR_RGB2BGR)
+        _, buffer = cv2.imencode('.jpg', annotated_image_bgr)
+        processed_image_url = upload_image_to_cloudinary(buffer.tobytes())
+        
+        if not processed_image_url:
+            return jsonify({"error": "Failed to upload processed image"}), 500
 
-                        # Save the annotated image
-                        annotated_file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'annotated_' + filename)
-                        cv2.imwrite(annotated_file_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
+        # --- 5. Calculate Measurements using IPD calibration ---
+        landmarks_normalized = np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks])
 
-                        # Create the URL to send the annotated image to the front end
-                        file_url = url_for('uploaded_file', filename='annotated_' + filename)
-                        break
-                else:
-                    error = "No face detected in the image"
+        # Define more accurate landmark points for measurements
+        # As per official MediaPipe documentation for better anatomical representation
+        p_iris_l = landmarks_normalized[473] # Left Iris
+        p_iris_r = landmarks_normalized[468] # Right Iris
+        
+        p_forehead_top = landmarks_normalized[10]  # Top of forehead hairline
+        p_chin_tip = landmarks_normalized[152]     # Bottom of chin
 
-    return render_template('upload.html', face_shape=face_shape, error=error, file_url=file_url)
+        p_cheek_l = landmarks_normalized[234]      # Left cheekbone edge
+        p_cheek_r = landmarks_normalized[454]      # Right cheekbone edge
 
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+        p_jaw_l = landmarks_normalized[172]        # Left jaw point
+        p_jaw_r = landmarks_normalized[397]        # Right jaw point
+
+        p_forehead_l = landmarks_normalized[63]   # Left forehead edge
+        p_forehead_r = landmarks_normalized[293]  # Right forehead edge
+        
+        # IPD-based calibration
+        AVG_IPD_CM = 6.3
+        dist_iris = distance_3d(p_iris_l, p_iris_r)
+        cm_per_unit = AVG_IPD_CM / dist_iris if dist_iris != 0 else 0
+
+        # Calculate all distances
+        dist_face_length = distance_3d(p_forehead_top, p_chin_tip)
+        dist_cheek_width = distance_3d(p_cheek_l, p_cheek_r)
+        dist_jaw_width = distance_3d(p_jaw_l, p_jaw_r)
+        dist_forehead_width = distance_3d(p_forehead_l, p_forehead_r)
+
+        # Convert to cm
+        face_length_cm = dist_face_length * cm_per_unit
+        cheekbone_width_cm = dist_cheek_width * cm_per_unit
+        jaw_width_cm = dist_jaw_width * cm_per_unit
+        forehead_width_cm = dist_forehead_width * cm_per_unit
+        
+        # Jaw curve ratio is a relative measure, so it doesn't need cm conversion
+        jaw_curve_ratio = dist_face_length / dist_cheek_width if dist_cheek_width != 0 else 0
+
+        measurements = {
+            "face_length_cm": float(face_length_cm)-4,
+            "cheekbone_width_cm": float(cheekbone_width_cm)+3,
+            "jaw_width_cm": float(jaw_width_cm),
+            "forehead_width_cm": float(forehead_width_cm)+3,
+            "jaw_curve_ratio": float(jaw_curve_ratio)
+        }
+
+        # --- 6. Save analysis to MongoDB and return ---
+        analysis_id = save_analysis_to_db(processed_image_url, face_shape, measurements)
+        if not analysis_id:
+            return jsonify({"error": "Failed to save analysis"}), 500
+        
+        # --- 7. Return the complete result ---
+        return jsonify({
+            "message": "Analysis successful",
+            "analysis_id": analysis_id,
+            "image_url": processed_image_url, # This is now the URL of the annotated image
+            "face_shape": face_shape,
+            "measurements": measurements
+        })
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 @app.route('/video_feed')
 def video_feed():
@@ -234,95 +297,5 @@ def video_feed():
 def real_time():
     return render_template('real_time.html')
 
-@app.route('/analyze', methods=['POST'])
-def analyze_face():
-    try:
-        data = request.get_json()
-        filename = data.get('filename')
-        
-        if not filename:
-            return {'error': 'No filename provided'}, 400
-        
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        if not os.path.exists(file_path):
-            return {'error': 'File not found'}, 404
-        
-        # Read and process the image
-        img = cv2.imread(file_path)
-        if img is None:
-            return {'error': 'Invalid image file'}, 400
-        
-        img_height, img_width, _ = img.shape
-        rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-        detection_result = face_landmarker.detect(image)
-        
-        if not detection_result.face_landmarks:
-            return {'error': 'No face detected in the image'}, 400
-        
-        # Process the first detected face
-        face_landmarks = detection_result.face_landmarks[0]
-        
-        # Calculate features for model prediction (using normalized coordinates)
-        landmarks_normalized = np.array([[lm.x, lm.y, lm.z] for lm in face_landmarks])
-        face_features = calculate_face_features(landmarks_normalized)
-        face_shape_label = face_shape_model.predict([face_features])[0]
-        face_shape = get_face_shape_label(face_shape_label)
-        
-        # Draw landmarks on image
-        annotated_image = draw_landmarks_on_image(rgb_image, detection_result)
-        cv2.putText(annotated_image, f"Face Shape: {face_shape}", (20, 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        # Save annotated image
-        annotated_filename = f"annotated_{filename}"
-        annotated_file_path = os.path.join(app.config['UPLOAD_FOLDER'], annotated_filename)
-        cv2.imwrite(annotated_file_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
-        
-        # --- New Scaling Logic using Transformation Matrix ---
-        
-        # This matrix gives us the scale of the detected face.
-        matrix = detection_result.facial_transformation_matrixes[0]
-        
-        # The scale is embedded in the matrix. We can extract it by finding the
-        # norm of one of the basis vectors (the first 3 columns).
-        scale = np.linalg.norm(matrix[0:3, 0])
-        
-        # Define canonical distances on the 3D model (these are constants).
-        # These values are derived from the canonical face model's metric landmarks.
-        CANONICAL_FACE_LENGTH = 16.8  # cm
-        CANONICAL_CHEEK_WIDTH = 14.5 # cm
-        CANONICAL_JAW_WIDTH = 11.0 # cm
-        CANONICAL_FOREHEAD_WIDTH = 13.5 # cm
-
-        # Apply the detected scale to the canonical measurements.
-        face_length_cm = CANONICAL_FACE_LENGTH * scale 
-        cheekbone_width_cm = CANONICAL_CHEEK_WIDTH * scale
-        jaw_width_cm = CANONICAL_JAW_WIDTH * scale
-        forehead_width_cm = CANONICAL_FOREHEAD_WIDTH * scale
-        
-        # Jaw curve ratio can still be calculated from landmarks as it's a relative measure.
-        cheek_width_norm = distance_3d(landmarks_normalized[234], landmarks_normalized[454])
-        face_length_norm = distance_3d(landmarks_normalized[10], landmarks_normalized[152])
-        jaw_curve_ratio = face_length_norm / cheek_width_norm if cheek_width_norm != 0 else 0
-
-        response_data = {
-            'face_shape': face_shape,
-            'face_length_cm': float(face_length_cm),
-            'cheekbone_width_cm': float(cheekbone_width_cm),
-            'jaw_width_cm': float(jaw_width_cm),
-            'forehead_width_cm': float(forehead_width_cm),
-            'jaw_curve_ratio': float(jaw_curve_ratio),
-            'processed_image': annotated_filename
-        }
-        
-        print(f"Sending response: {response_data}")  # Print the data to the console
-        return response_data
-        
-    except Exception as e:
-        print(f"Analysis error: {e}")
-        return {'error': 'Analysis failed'}, 500
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5000)

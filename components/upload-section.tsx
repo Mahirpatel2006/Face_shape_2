@@ -10,16 +10,14 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 
 interface UploadSectionProps {
-  onImageUpload: (filename: string) => void
-  onAnalyze: (filename: string, gender: string) => void
+  onAnalysisComplete: (data: any) => void
   isAnalyzing: boolean
   gender: string
   setGender: (gender: string) => void
 }
 
 export default function UploadSection({
-  onImageUpload,
-  onAnalyze,
+  onAnalysisComplete,
   isAnalyzing,
   gender,
   setGender,
@@ -38,7 +36,7 @@ export default function UploadSection({
     formData.append("file", file)
 
     try {
-      const response = await fetch("/api/upload", {
+      const response = await fetch("http://localhost:5000/analyze", {
         method: "POST",
         body: formData,
       })
@@ -46,15 +44,14 @@ export default function UploadSection({
       const data = await response.json()
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to upload image")
+        throw new Error(data.error || "Analysis failed")
       }
 
-      toast.success("Image uploaded successfully")
-      onImageUpload(data.filename)
-      onAnalyze(data.filename, gender)
+      toast.success("Analysis successful!")
+      onAnalysisComplete(data)
     } catch (error) {
-      console.error("Upload error:", error)
-      toast.error(error instanceof Error ? error.message : "Failed to upload image")
+      console.error("Analysis error:", error)
+      toast.error(error instanceof Error ? error.message : "An unknown error occurred")
     } finally {
       setIsUploading(false)
     }
@@ -66,7 +63,7 @@ export default function UploadSection({
         handleFileUpload(acceptedFiles[0])
       }
     },
-    [gender] // Dependency on gender ensures the latest value is used
+    []
   )
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({

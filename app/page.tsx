@@ -11,61 +11,24 @@ import FaceShapesGuide from "@/components/face-shapes-guide"
 import Footer from "@/components/footer"
 import StylingInsights from "@/components/styling-insights"
 
-interface UploadedImage {
-  file: File
-  preview: string
+interface AnalysisData {
+  image_url: string;
+  face_shape: string;
+  measurements: any;
+  analysis_id: string;
 }
 
 export default function Home() {
-  const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [analysisResult, setAnalysisResult] = useState<any>(null)
-  const [gender, setGender] = useState("female")
+  const [analysisResult, setAnalysisResult] = useState<AnalysisData | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [gender, setGender] = useState("female");
 
-  const handleImageUpload = (filename: string) => {
-    // Create a mock uploaded image object for AnalysisCard
-    const mockFile = new File([], filename)
-    const mockUploadedImage: UploadedImage = {
-      file: mockFile,
-      preview: `/uploads/${filename}`,
-    }
-    setUploadedImage(mockUploadedImage)
-    setAnalysisResult(null)
-  }
-
-  const handleAnalyze = async (filename: string, gender: string) => {
-    if (!filename) return
-
-    setIsAnalyzing(true)
-    setAnalysisResult(null)
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ filename, gender }),
-      })
-
-      const result = await response.json()
-      console.log("Received analysis result:", result)
-
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to analyze image")
-      }
-
-      setAnalysisResult(result)
-    } catch (error) {
-      console.error("Analysis error:", error)
-      if (error instanceof Error) {
-        toast.error(error.message)
-      } else {
-        toast.error("An unknown error occurred during analysis.")
-      }
-    } finally {
-      setIsAnalyzing(false)
-    }
-  }
+  const handleAnalysisComplete = (data: AnalysisData) => {
+    setIsAnalyzing(true); // Keep the analyzing state for smooth transition
+    // The AnalysisCard will now use the direct image_url from the backend
+    setAnalysisResult(data);
+    setIsAnalyzing(false);
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-100 relative overflow-hidden">
@@ -90,17 +53,15 @@ export default function Home() {
         <div className="container mx-auto px-4 py-8 relative z-10">
           <Toaster position="top-center" richColors />
           <UploadSection
-            onImageUpload={handleImageUpload}
-            onAnalyze={handleAnalyze}
+            onAnalysisComplete={handleAnalysisComplete}
             isAnalyzing={isAnalyzing}
             gender={gender}
             setGender={setGender}
           />
 
           {/* Analysis Card - Enhanced Display */}
-          {uploadedImage && (
+          {analysisResult && (
             <AnalysisCard
-              uploadedImage={uploadedImage}
               analysis={analysisResult}
               isAnalyzing={isAnalyzing}
             />
@@ -110,7 +71,6 @@ export default function Home() {
           {/* {analysisResult && <ResultSection result={analysisResult} />} */}
 
           {/* Face Shape Guide */}
-
           {analysisResult && <StylingInsights faceShape={analysisResult.face_shape} gender={gender} />}
           <br />
           <FaceShapesGuide />

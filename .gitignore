@@ -57,3 +57,12 @@ Best_RandomForest.pkl
 # Other
 .DS_Store
 desktop.ini
+
+# editorconfig
+.editorconfig
+
+# dotenv
+.env
+
+# Folders to ignore
+/node_modules
