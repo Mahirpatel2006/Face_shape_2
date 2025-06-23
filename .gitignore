@@ -50,8 +50,6 @@ env/
 /uploads/
 /Dataset/
 /annotated_*.jpg
-Best_RandomForest.pkl
-*.task
 *.ipynb
 
 # Other
